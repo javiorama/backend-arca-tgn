@@ -1,9 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
-const Afip = require('@afipsdk/afip.js');
 const fs = require('fs');
-const path = require('path');
 
 dotenv.config();
 
@@ -19,18 +17,34 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// Health check
+// Health check - siempre responde
 app.get('/health', (req, res) => {
-  res.json({ status: 'OK', timestamp: new Date().toISOString() });
+  const tieneCert = !!(process.env.AFIP_CERT_BASE64 && process.env.AFIP_KEY_BASE64);
+  res.json({
+    status: 'OK',
+    timestamp: new Date().toISOString(),
+    certificado: tieneCert ? 'configurado' : 'pendiente',
+    cuit: process.env.AFIP_CUIT || 'no configurado',
+    produccion: process.env.AFIP_PRODUCTION === 'true'
+  });
 });
+
+// Verificar si el certificado está configurado
+const verificarCertificado = () => {
+  if (!process.env.AFIP_CERT_BASE64 || !process.env.AFIP_KEY_BASE64) {
+    throw new Error('Certificado ARCA no configurado. Cargá AFIP_CERT_BASE64 y AFIP_KEY_BASE64 en las variables de entorno.');
+  }
+};
 
 // Inicializar AFIP/ARCA
 const getAfipInstance = () => {
-  // El certificado y clave se leen de variables de entorno (base64)
-  const cert = Buffer.from(process.env.AFIP_CERT_BASE64 || '', 'base64').toString('utf8');
-  const key = Buffer.from(process.env.AFIP_KEY_BASE64 || '', 'base64').toString('utf8');
+  verificarCertificado();
 
-  // Guardar temporalmente en disco (requerido por afip.js)
+  const Afip = require('@afipsdk/afip.js');
+
+  const cert = Buffer.from(process.env.AFIP_CERT_BASE64, 'base64').toString('utf8');
+  const key = Buffer.from(process.env.AFIP_KEY_BASE64, 'base64').toString('utf8');
+
   const certPath = '/tmp/afip_cert.pem';
   const keyPath = '/tmp/afip_key.pem';
   fs.writeFileSync(certPath, cert);
@@ -46,58 +60,34 @@ const getAfipInstance = () => {
   });
 };
 
-// GET /ultimo-remito - obtener último número de remito
+// GET /ultimo-remito
 app.get('/ultimo-remito', async (req, res) => {
   try {
     const afip = getAfipInstance();
     const puntoVenta = parseInt(process.env.AFIP_PUNTO_VENTA || '1');
-
-    // Tipo 91 = Remito X
     const ultimoNumero = await afip.ElectronicBilling.getLastVoucher(puntoVenta, 91);
-
-    res.json({
-      success: true,
-      ultimoNumero,
-      proximoNumero: ultimoNumero + 1
-    });
+    res.json({ success: true, ultimoNumero, proximoNumero: ultimoNumero + 1 });
   } catch (error) {
-    console.error('Error obteniendo último remito:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    console.error('Error:', error.message);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// POST /generar-remito - generar remito con CAI
+// POST /generar-remito
 app.post('/generar-remito', async (req, res) => {
   try {
-    const {
-      cliente,
-      representante,
-      orden,
-      producto,
-      descripcion,
-      fechaEntrega,
-      direccion,
-      cantidad
-    } = req.body;
+    const { cliente, orden, producto } = req.body;
 
     if (!cliente || !orden) {
-      return res.status(400).json({
-        success: false,
-        error: 'Faltan datos requeridos: cliente y orden'
-      });
+      return res.status(400).json({ success: false, error: 'Faltan datos: cliente y orden son requeridos' });
     }
 
     const afip = getAfipInstance();
     const puntoVenta = parseInt(process.env.AFIP_PUNTO_VENTA || '1');
 
-    // Obtener último número
     const ultimoNumero = await afip.ElectronicBilling.getLastVoucher(puntoVenta, 91);
     const nuevoNumero = ultimoNumero + 1;
 
-    // Fecha en formato YYYYMMDD
     const hoy = new Date();
     const fechaAFIP = parseInt(
       hoy.getFullYear().toString() +
@@ -105,18 +95,17 @@ app.post('/generar-remito', async (req, res) => {
       String(hoy.getDate()).padStart(2, '0')
     );
 
-    // Datos del comprobante - Remito X (tipo 91)
     const datosComprobante = {
-      CantReg: 1,           // Cantidad de comprobantes
-      PtoVta: puntoVenta,   // Punto de venta
-      CbteTipo: 91,         // Tipo 91 = Remito X
-      Concepto: 1,          // 1 = Productos
-      DocTipo: 99,          // 99 = Consumidor final / sin CUIT
+      CantReg: 1,
+      PtoVta: puntoVenta,
+      CbteTipo: 91,
+      Concepto: 1,
+      DocTipo: 99,
       DocNro: 0,
       CbteDesde: nuevoNumero,
       CbteHasta: nuevoNumero,
       CbteFch: fechaAFIP,
-      ImpTotal: 0,          // Remito no tiene importe
+      ImpTotal: 0,
       ImpTotConc: 0,
       ImpNeto: 0,
       ImpOpEx: 0,
@@ -141,15 +130,13 @@ app.post('/generar-remito', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error generando remito ARCA:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    console.error('Error generando remito:', error.message);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
 app.listen(PORT, () => {
   console.log(`Backend ARCA TGN corriendo en puerto ${PORT}`);
-  console.log(`Modo: ${process.env.AFIP_PRODUCTION === 'true' ? 'PRODUCCIÓN' : 'HOMOLOGACIÓN'}`);
+  console.log(`Modo: ${process.env.AFIP_PRODUCTION === 'true' ? 'PRODUCCION' : 'HOMOLOGACION'}`);
+  console.log(`Certificado: ${process.env.AFIP_CERT_BASE64 ? 'configurado' : 'PENDIENTE'}`);
 });
