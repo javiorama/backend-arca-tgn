@@ -1,0 +1,7 @@
+node_modules/
+.env
+*.pem
+*.p12
+*.key
+*.crt
+/tmp/
